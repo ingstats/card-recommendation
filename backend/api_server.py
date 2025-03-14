@@ -1,39 +1,47 @@
 from flask import Flask, request, jsonify
-from recommender import get_recommendations
+from recommender import recommend_cards
 from card_data_loader import load_card_data
-from rag_retriever import get_card_rag_explanations
-from gpt_summary_generator import summarize_recommendations
+from rag_retriever import retrieve_similar_card_descriptions
+from gpt_summary_generator import generate_summary_with_model
 
 app = Flask(__name__)
 card_df = load_card_data()
 
-@app.route("/recommend_card", methods=["POST"])
-def recommend_card():
-    user_profile = request.json.get("user_profile", {})
-    context = request.json.get("context", "")
+@app.route("/recommend", methods=["POST"])
+def recommend():
+    data = request.json
 
-    recommendations = get_recommendations(user_profile)
-    rag_results = get_card_rag_explanations(context, top_k=3)
+    user_profile = {
+        "age": data.get("age"),
+        "income": data.get("income"),
+        "keywords": data.get("keywords", []),
+    }
+    context = data.get("context", "")
 
-    enriched = []
-    for rec in recommendations:
-        match = card_df[card_df["Card Name"] == rec["card_name"]].iloc[0]
-        explanation = f"{rec['card_name']}는 {context}에 적합하며, 주요 혜택은 {match['Benefits']}"
-        enriched.append({
-            "card_name": rec["card_name"],
-            "corporate": match["Corporate Name"],
-            "benefits": match["Benefits"],
-            "image_url": match["Image URLs"],
-            "score": rec["score"],
-            "rag_explanation": explanation
+    # 카드 추천
+    recommended_cards = recommend_cards(user_profile, card_df)
+
+    # 추천 카드별 설명 생성
+    recommendation_list = []
+    for card in recommended_cards:
+        rag_text = retrieve_similar_card_descriptions(card["Card Name"], card_df)
+        summary = generate_summary_with_model(card["Card Name"], rag_text)
+
+        recommendation_list.append({
+            "Card Name": card["Card Name"],
+            "Corporate Name": card["Corporate Name"],
+            "Benefits": card["Benefits"],
+            "image_url": card.get("Image URLs", ""),
+            "summary": summary
         })
 
-    summary = summarize_recommendations(context, enriched)
+    # 전체 요약 텍스트
+    overall_summary = f"{len(recommendation_list)}개의 카드를 추천해드렸습니다."
 
     return jsonify({
-        "recommendations": enriched,
-        "summary": summary
+        "summary": overall_summary,
+        "recommendations": recommendation_list
     })
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=5000)
