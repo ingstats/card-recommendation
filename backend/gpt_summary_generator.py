@@ -1,29 +1,17 @@
-import openai
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
-openai.api_key = "YOUR_OPENAI_API_KEY"
+# 한국어 요약 모델 (필요 시 다른 모델로 교체 가능)
+MODEL_NAME = "knkarthick/MEETING_SUMMARY"
 
-def summarize_recommendations(user_text, recommendation_cards):
-    cards_formatted = ""
-    for card in recommendation_cards:
-        cards_formatted += f"""
-✅ {card['card_name']} ({card['corporate']})
-- 주요 혜택: {card['benefits']}
-- 추천 이유: {card['rag_explanation']}
-- 카드 이미지: {card['image_url']}\n"""
+# 모델 및 토크나이저 로딩
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
+summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
 
-    prompt = f"""[카드 추천 응답 요약 템플릿]
-
-사용자 소비 문맥: "{user_text}"
-
-추천 카드 목록:
-{cards_formatted}
-
-위 카드 목록을 바탕으로, 사용자가 이해하기 쉽게 자연어로 설명을 구성하세요. 각 카드에 대해 친절한 말투로 소개하고, 선택 이유를 부각하세요.
-"""
-
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "system", "content": "너는 카드 추천 컨설턴트야."},
-                  {"role": "user", "content": prompt}]
-    )
-    return response["choices"][0]["message"]["content"]
+def generate_summary_with_model(card_name: str, benefits_text: str) -> str:
+    try:
+        full_text = f"카드 이름: {card_name}\n혜택 설명: {benefits_text}"
+        summary = summarizer(full_text, max_length=100, min_length=30, do_sample=False)
+        return summary[0]["summary_text"]
+    except Exception as e:
+        return f"{card_name}의 요약 정보를 불러오지 못했습니다. ({e})"
