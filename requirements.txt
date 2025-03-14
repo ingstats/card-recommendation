@@ -1,0 +1,7 @@
+flask
+openai
+requests
+pandas
+faiss-cpu
+sentence-transformers
+streamlit
