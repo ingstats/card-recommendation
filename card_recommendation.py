@@ -4,7 +4,7 @@ import numpy as np
 import json
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai
 import mysql.connector
 from sentence_transformers import SentenceTransformer
 
@@ -26,7 +26,8 @@ class CardRecommendationRAG:
         self.mysql_config = mysql_config
         
         # OpenAI 클라이언트 초기화
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        openai.api_key=OPENAI_API_KEY 
+        self.client = openai
         
         # SentenceTransformer 모델 로드 (의미론적 검색용)
         self.embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
@@ -626,14 +627,14 @@ class CardRecommendationRAG:
             ]
             
             # GPT API 호출
-            response = self.client.chat.completions.create(
+            response = self.client.ChatCompletion.create(
                 model="gpt-3.5-turbo",  
                 messages=messages,
                 max_tokens=1500,
                 temperature=0.7
             )
             
-            return response.choices[0].message.content
+            return response.choices[0].message['content']
             
         except Exception as e:
             print(f"GPT 응답 생성 중 오류 발생: {str(e)}")
