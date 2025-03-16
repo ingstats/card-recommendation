@@ -1,4 +1,6 @@
 #!/bin/bash
+source .env
+
 echo "==== 카드 추천 시스템 MySQL 테이블 설정 ===="
 
 # MySQL 서버가 준비될 때까지 대기
@@ -8,7 +10,7 @@ for i in {1..30}; do
   sleep 1
   # 5초마다 연결 시도
   if [ $((i % 5)) -eq 0 ]; then
-    if docker exec mysql-card-rec mysqladmin -urecommendation_team -p ping --silent > /dev/null 2>&1; then
+    if docker exec mysql-card-rec mysqladmin -u${MYSQL_PASSWORD} ping --silent > /dev/null 2>&1; then
       echo -e "\nMySQL 서버가 준비되었습니다!"
       break
     fi

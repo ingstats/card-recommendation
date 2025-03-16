@@ -781,10 +781,10 @@ class CardRecommendationRAG:
 if __name__ == "__main__":
     # MySQL 설정
     mysql_config = {
-    "host": "localhost",  # 팀원들은 여기에 당신의 맥북 IP를 입력해야 함
-    "user": "team_user",
-    "password": "",  # docker-compose.yml에서 설정한 비밀번호
-    "database": "card_recommendation"
+    "host": os.getenv("MYSQL_HOST","localhost"),  # 팀원들은 여기에 당신의 맥북 IP를 입력해야 함
+    "user": os.getenv("MYSQL_USER","recommendtation_team"),
+    "password": os.getenv("MYSQL_PASSWORD",""),  # docker-compose.yml에서 설정한 비밀번호
+    "database": os.getenv("MYSQL_DATABASE","card_recommendation")
 }
     
     # 추천 시스템 초기화

@@ -5,10 +5,10 @@ services:
     container_name: mysql-card-rec
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: dhtkddncjswo3@ 
-      MYSQL_DATABASE: card_recommendation
-      MYSQL_USER: recommendation_team
-      MYSQL_PASSWORD: 
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-your_root_password} 
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-card_recommendation}
+      MYSQL_USER: ${MYSQL_USER:-recommendation_team}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-your_password}
     ports:
       - "3306:3306"
     command: >
