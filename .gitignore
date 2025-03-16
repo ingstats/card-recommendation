@@ -172,3 +172,18 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# 엑셀 파일
+*.xlsx
+*.xls
+
+#모델 캐시
+card_embeddings.npy
+card_ids.json
+
+#가상환경
+card_env/
+venv/
+
+#환경변수
+.env
