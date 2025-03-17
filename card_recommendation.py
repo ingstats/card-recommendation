@@ -4,20 +4,43 @@ import numpy as np
 import json
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
-import openai
 import mysql.connector
-from sentence_transformers import SentenceTransformer
+
+# LangChain 관련 임포트
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.chat_models import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain.chains import LLMChain
+from langchain.schema import Document
+from langchain.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+from langchain.retrievers.self_query.base import SelfQueryRetriever
 
 # 환경 변수 로드
 load_dotenv()
 
 # API 키 설정
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
+class CardRecommendation(BaseModel):
+    """카드 추천 결과를 위한 Pydantic 모델"""
+    card_name: str = Field(description="추천 카드 이름")
+    corporate_name: str = Field(description="카드사 이름")
+    recommendation_reason: str = Field(description="추천 이유")
+    benefits: List[Dict[str, str]] = Field(description="카드 혜택 목록")
+
+class CardRecommendationResponse(BaseModel):
+    """최종 추천 응답을 위한 Pydantic 모델"""
+    user_summary: str = Field(description="사용자 소비 패턴 요약")
+    recommendations: List[CardRecommendation] = Field(description="추천 카드 목록")
+    summary_opinion: str = Field(description="종합 추천 의견")
 
 class CardRecommendationRAG:
     def __init__(self, mysql_config: Dict[str, Any]):
         """
-        우리카드 데이터 기반 RAG 카드 추천 시스템 초기화
+        LangChain 기반 카드 추천 RAG 시스템 초기화
         
         Args:
             mysql_config: MySQL 연결 설정 (host, user, password, database 등)
@@ -25,16 +48,21 @@ class CardRecommendationRAG:
         # MySQL 연결 설정
         self.mysql_config = mysql_config
         
-        # OpenAI 클라이언트 초기화
-        openai.api_key=OPENAI_API_KEY 
-        self.client = openai
+        # LangChain 임베딩 모델 초기화 (SentenceTransformer 대체)
+        self.embedding_model = HuggingFaceEmbeddings(
+            model_name="paraphrase-multilingual-MiniLM-L12-v2"
+        )
         
-        # SentenceTransformer 모델 로드 (의미론적 검색용)
-        self.embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+        # LangChain LLM 초기화 (OpenAI API 대체)
+        self.llm = ChatOpenAI(
+            temperature=0.7,
+            model_name="gpt-3.5-turbo",
+            max_tokens=1500
+        )
         
-        # 카드 데이터 로드 및 임베딩 생성
+        # 카드 데이터 로드 및 벡터 저장소 생성
         self.load_card_data()
-        self.generate_card_embeddings()
+        self.create_vector_store()
     
     def load_card_data(self):
         """MySQL에서 카드 데이터 로드"""
@@ -46,7 +74,7 @@ class CardRecommendationRAG:
             # 카드 정보 쿼리
             query = """
             SELECT c.card_id, c.card_name, c.corporate_name, c.benefits, c.image_url, 
-                    c.card_type
+                   c.card_type
             FROM cards c
             """
             cursor.execute(query)
@@ -54,7 +82,7 @@ class CardRecommendationRAG:
             # 결과를 DataFrame으로 변환
             self.cards_df = pd.DataFrame(cursor.fetchall())
             
-            # 카드고릴라 크롤링 데이터 로드 (상세 정보용) - additional_info 제거
+            # 카드고릴라 크롤링 데이터 로드 (상세 정보용)
             query_gorilla = """
             SELECT cg.card_id, cg.detailed_benefits
             FROM card_gorilla_data cg
@@ -80,62 +108,84 @@ class CardRecommendationRAG:
             cursor.close()
             connection.close()
             
+            # 카드 문서 생성 (LangChain Document 형식)
+            self.create_card_documents()
+            
         except Exception as e:
             print(f"카드 데이터 로드 중 오류 발생: {str(e)}")
             self.cards_df = pd.DataFrame()  # 빈 DataFrame 생성
     
-    def generate_card_embeddings(self):
-        """카드 데이터의 의미론적 검색용 임베딩 생성"""
+    def create_card_documents(self):
+        """카드 데이터를 LangChain Document 형식으로 변환"""
+        self.card_documents = []
+        self.card_ids = []
+        
+        for idx, card in self.cards_df.iterrows():
+            # 카드 정보를 하나의 텍스트로 결합
+            card_text = f"카드명: {card.get('card_name', '')}\n"
+            card_text += f"카드사: {card.get('corporate_name', '')}\n"
+            card_text += f"카드 타입: {card.get('card_type', '')}\n"
+            card_text += f"혜택: {card.get('benefits', '')}\n"
+            
+            # 카드고릴라 상세 정보가 있으면 추가
+            if 'detailed_benefits' in card and card['detailed_benefits']:
+                card_text += f"상세 혜택: {card.get('detailed_benefits', '')}\n"
+            
+            # 메타데이터 구성
+            metadata = {
+                'card_id': card.get('card_id'),
+                'card_name': card.get('card_name', ''),
+                'corporate_name': card.get('corporate_name', ''),
+                'card_type': card.get('card_type', ''),
+                'benefits': card.get('benefits', ''),
+                'detailed_benefits': card.get('detailed_benefits', '') if 'detailed_benefits' in card else '',
+                'image_url': card.get('image_url', '')
+            }
+            
+            # LangChain Document 생성
+            self.card_documents.append(
+                Document(
+                    page_content=card_text,
+                    metadata=metadata
+                )
+            )
+            
+            self.card_ids.append(card.get('card_id'))
+    
+    def create_vector_store(self):
+        """LangChain FAISS 벡터 저장소 생성"""
         try:
             # 캐시 파일 경로
-            cache_file = 'card_embeddings.npy'
-            ids_file = 'card_ids.json'
+            cache_file = 'faiss_index'
             
-            # 캐시된 임베딩이 있는지 확인
-            if os.path.exists(cache_file) and os.path.exists(ids_file):
-                # 캐시된 임베딩 로드
-                self.card_embeddings = np.load(cache_file)
+            # 캐시된 벡터 저장소가 있는지 확인
+            if os.path.exists(f"{cache_file}.faiss") and os.path.exists(f"{cache_file}.pkl"):
+                # 캐시된 벡터 저장소 로드
+                self.vector_store = FAISS.load_local(
+                    folder_path=".",
+                    index_name=cache_file,
+                    embeddings=self.embedding_model
+                )
+                print(f"캐시된 벡터 저장소 로드 완료")
+            else:
+                # 새 벡터 저장소 생성
+                self.vector_store = FAISS.from_documents(
+                    documents=self.card_documents,
+                    embedding=self.embedding_model
+                )
                 
-                with open(ids_file, 'r') as f:
-                    self.card_ids = json.load(f)
-                
-                print(f"캐시된 임베딩 로드 완료: {len(self.card_embeddings)} 임베딩")
-                return
+                # 벡터 저장소 캐싱
+                self.vector_store.save_local(folder_path=".", index_name=cache_file)
+                print(f"카드 벡터 저장소 생성 완료")
             
-            # 임베딩 생성
-            self.card_texts = []
-            self.card_ids = []
-            
-            for idx, card in self.cards_df.iterrows():
-                # 카드 정보를 하나의 텍스트로 결합
-                card_text = f"카드명: {card.get('card_name', '')}\n"
-                card_text += f"카드사: {card.get('corporate_name', '')}\n"
-                card_text += f"카드 타입: {card.get('card_type', '')}\n"
-                card_text += f"혜택: {card.get('benefits', '')}\n"
-                
-                # 카드고릴라 상세 정보가 있으면 추가
-                if 'detailed_benefits' in card and card['detailed_benefits']:
-                    card_text += f"상세 혜택: {card.get('detailed_benefits', '')}\n"
-                
-                
-                self.card_texts.append(card_text)
-                self.card_ids.append(card.get('card_id'))
-            
-            # 배치 처리로 임베딩 생성
-            self.card_embeddings = self.embedding_model.encode(self.card_texts, batch_size=32)
-            
-            # 임베딩 캐싱
-            np.save(cache_file, self.card_embeddings)
-            
-            with open(ids_file, 'w') as f:
-                json.dump(self.card_ids, f)
-            
-            print(f"카드 임베딩 생성 완료: {len(self.card_embeddings)} 임베딩")
+            # 검색기(Retriever) 생성
+            self.retriever = self.vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": 10}
+            )
             
         except Exception as e:
-            print(f"임베딩 생성 중 오류 발생: {str(e)}")
-            self.card_embeddings = np.array([])
-            self.card_ids = []
+            print(f"벡터 저장소 생성 중 오류 발생: {str(e)}")
     
     def get_user_profile(self, user_id: str) -> Dict[str, Any]:
         """
@@ -209,7 +259,7 @@ class CardRecommendationRAG:
     
     def semantic_search(self, query: str, user_profile: Dict[str, Any], top_k: int = 10) -> List[Dict[str, Any]]:
         """
-        의미론적 검색 수행
+        LangChain 기반 의미론적 검색 수행
         
         Args:
             query: 검색 쿼리
@@ -220,10 +270,6 @@ class CardRecommendationRAG:
             List: 검색 결과 (카드 정보)
         """
         try:
-            # 임베딩이 없으면 빈 결과 반환
-            if len(self.card_embeddings) == 0:
-                return []
-            
             # 사용자 프로필 정보를 쿼리에 추가하여 맥락화
             contextualized_query = query
             if user_profile:
@@ -231,25 +277,13 @@ class CardRecommendationRAG:
                 user_context += f"{user_profile.get('직업', '')}이며, {user_profile.get('소비 패턴', '')}입니다. "
                 contextualized_query = user_context + query
             
-            # 쿼리 임베딩 생성
-            query_embedding = self.embedding_model.encode(contextualized_query)
-            
-            # 정규화
-            query_embedding_norm = np.linalg.norm(query_embedding)
-            if query_embedding_norm > 0:
-                query_embedding = query_embedding / query_embedding_norm
-            
-            # 코사인 유사도 계산
-            similarities = np.dot(self.card_embeddings, query_embedding)
-            
-            # 상위 결과 인덱스
-            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            # LangChain 검색기로 관련 문서 검색
+            relevant_docs = self.retriever.get_relevant_documents(contextualized_query)
             
             # 결과 구성
             results = []
-            for idx in top_indices:
-                card_id = self.card_ids[idx]
-                score = similarities[idx]
+            for i, doc in enumerate(relevant_docs[:top_k]):
+                card_id = doc.metadata.get('card_id')
                 
                 # 원본 카드 데이터 가져오기
                 card_data = self.cards_df[self.cards_df['card_id'] == card_id]
@@ -259,7 +293,7 @@ class CardRecommendationRAG:
                     
                     results.append({
                         'card_id': card_id,
-                        'similarity_score': float(score),
+                        'similarity_score': 1.0 - (i * 0.05),  # 유사도 점수 근사화 (1.0에서 시작하여 0.05씩 감소)
                         'recommendation_reason': self._generate_recommendation_reason(card_dict, query, user_profile),
                         'details': card_dict
                     })
@@ -494,88 +528,74 @@ class CardRecommendationRAG:
         
         return parsed_benefits
     
-    def prepare_context_for_gpt(self, user_profile: Dict[str, Any], 
-                              recommendations: List[Dict[str, Any]]) -> str:
+    def prepare_context_for_llm(self, user_profile: Dict[str, Any], 
+                              recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        GPT에 전달할 컨텍스트 정보 준비
+        LLM에 전달할 컨텍스트 정보 준비 (LangChain 형식)
         
         Args:
             user_profile: 사용자 프로필 정보
             recommendations: 추천 카드 목록
             
         Returns:
-            str: GPT에 전달할 컨텍스트 문자열
+            Dict: LLM에 전달할 컨텍스트 정보
         """
-        context = "## 사용자 정보\n"
-        
-        # 사용자 프로필 정보
-        context += "### 사용자 프로필\n"
+        # 사용자 프로필 정보 구성
+        user_info = {}
         for key, value in user_profile.items():
             if key != 'user_id':  # user_id는 제외
-                context += f"- {key}: {value}\n"
+                user_info[key] = value
         
-        # 추천 카드 정보
-        context += "\n## 추천 카드 정보\n"
-        
+        # 추천 카드 정보 구성
+        rec_cards = []
         for i, rec in enumerate(recommendations, 1):
             details = rec.get('details', {})
             
             # 카드 기본 정보
             card_name = details.get('card_name', '이름 없음')
             corporate_name = details.get('corporate_name', '정보 없음')
-            
-            context += f"### {i}. {card_name}\n"
-            context += f"- 카드사: {corporate_name}\n"
-            context += f"- 추천 점수: {rec.get('recommendation_score', '정보 없음')}\n"
-            context += f"- 추천 이유: {rec.get('recommendation_reason', '정보 없음')}\n"
-            
-            # 카드 타입 및 연회비
             card_type = details.get('card_type', '')
-            annual_fee = details.get('annual_fee', '')
-            
-            if card_type:
-                context += f"- 카드 타입: {card_type}\n"
-            
-            if annual_fee:
-                context += f"- 연회비: {annual_fee}\n"
             
             # 혜택 정보 처리
             benefits_str = details.get('benefits', '')
             parsed_benefits = self.parse_benefits(benefits_str)
             
-            if parsed_benefits:
-                context += "- 주요 혜택:\n"
-                for benefit in parsed_benefits:
-                    category = benefit.get('category', '')
-                    description = benefit.get('description', '')
-                    if description:
-                        context += f"  * {category}: {description}\n"
-                    else:
-                        context += f"  * {category}\n"
-            elif benefits_str:  # 파싱은 실패했지만 혜택 정보는 있는 경우
-                context += f"- 주요 혜택: {benefits_str}\n"
+            benefits_list = []
+            for benefit in parsed_benefits:
+                category = benefit.get('category', '')
+                description = benefit.get('description', '')
+                if description:
+                    benefits_list.append(f"{category}: {description}")
+                else:
+                    benefits_list.append(f"{category}")
             
-            # 카드고릴라 상세 정보
-            detailed_benefits = details.get('detailed_benefits', '')
-
+            # 카드 정보 구성
+            card_info = {
+                "번호": i,
+                "카드명": card_name,
+                "카드사": corporate_name,
+                "추천 점수": rec.get('recommendation_score', '정보 없음'),
+                "추천 이유": rec.get('recommendation_reason', '정보 없음'),
+                "카드 타입": card_type,
+                "주요 혜택": benefits_list,
+                "상세 혜택": details.get('detailed_benefits', ''),
+                "이미지 URL": details.get('image_url', '')
+            }
             
-            if detailed_benefits:
-                context += f"- 상세 혜택: {detailed_benefits}\n"
-            
-            
-            # 이미지 URL 정보 추가
-            image_url = details.get('image_url', '')
-            if image_url:
-                context += f"- 이미지 URL: {image_url}\n"
-            
-            context += "\n"
+            rec_cards.append(card_info)
+        
+        # 전체 컨텍스트 정보
+        context = {
+            "사용자_프로필": user_info,
+            "추천_카드": rec_cards
+        }
         
         return context
     
-    def generate_response_with_gpt(self, user_query: str, user_profile: Dict[str, Any], 
+    def generate_response_with_llm(self, user_query: str, user_profile: Dict[str, Any], 
                                  recommendations: List[Dict[str, Any]]) -> str:
         """
-        GPT API를 사용하여 사용자 질문에 대한 응답 생성
+        LangChain LLM을 사용하여 사용자 질문에 대한 응답 생성
         
         Args:
             user_query: 사용자 질문
@@ -583,61 +603,66 @@ class CardRecommendationRAG:
             recommendations: 추천 카드 목록
             
         Returns:
-            str: GPT 응답 문자열
+            str: LLM 응답 문자열
         """
         try:
-            # 컨텍스트 준비
-            context = self.prepare_context_for_gpt(user_profile, recommendations)
+            # 컨텍스트 준비 (LangChain 형식)
+            context = self.prepare_context_for_llm(user_profile, recommendations)
             
-            # 프롬프트 구성
-            messages = [
-                {"role": "system", "content": """
-                 당신은 신용카드 추천 전문가입니다. 사용자의 질문에 대해 제공된 카드 정보를 기반으로 
-                 정확하고 친절하게 답변해 주세요. 카드의 혜택을 명확히 설명하고, 사용자에게 가장 적합한 
-                 카드를 추천해 주세요. 카드 정보는 신뢰할 수 있는 데이터베이스에서 가져온 것입니다.
-                 
-                 반드시 응답에 추천하는 카드의 이름, 카드사, 그리고 각 카드의 주요 혜택을 상세하게 포함시켜야 합니다.
-                 혜택은 카테고리별로 구분하여 설명하고, 사용자의 소비 패턴과 관련된 혜택을 강조해 주세요.
-                 
-                 사용자의 질문을 분석하여 가장 적합한 카드를 먼저 추천하고, 그 이유를 설명해 주세요.
-                 각 카드의 혜택을 명확히 표시하고, 사용자가 이해하기 쉽도록 구체적인 예시를 들어 설명해 주세요.
-                 """},
-                {"role": "user", "content": f"""
-                 다음은 사용자의 질문입니다:
-                 {user_query}
-                 
-                 다음은 사용자 정보와 추천 카드에 대한 정보입니다:
-                 {context}
-                 
-                 응답 형식:
-                 1. 사용자의 소비 패턴 요약
-                 2. 추천 카드 목록 (각 카드마다):
-                    - 카드명: [카드 이름]
-                    - 카드사: [카드사 이름]
-                    - 추천 이유: [사용자 특성에 맞는 추천 이유]
-                    - 주요 혜택:
-                      * [혜택 카테고리1]: [혜택 설명1]
-                      * [혜택 카테고리2]: [혜택 설명2]
-                      * [혜택 카테고리3]: [혜택 설명3]
-                 3. 종합 추천 의견
-                 
-                 위 정보를 바탕으로 사용자의 질문에 자연스럽게 답변해주세요.
-                 답변은 친절하고 자연스러운 대화체로 작성해주세요.
-                 """}
-            ]
+            # 시스템 프롬프트 템플릿
+            system_template = """
+            당신은 신용카드 추천 전문가입니다. 사용자의 질문에 대해 제공된 카드 정보를 기반으로 
+            정확하고 친절하게 답변해 주세요. 카드의 혜택을 명확히 설명하고, 사용자에게 가장 적합한 
+            카드를 추천해 주세요. 카드 정보는 신뢰할 수 있는 데이터베이스에서 가져온 것입니다.
             
-            # GPT API 호출
-            response = self.client.ChatCompletion.create(
-                model="gpt-3.5-turbo",  
-                messages=messages,
-                max_tokens=1500,
-                temperature=0.7
-            )
+            반드시 응답에 추천하는 카드의 이름, 카드사, 그리고 각 카드의 주요 혜택을 상세하게 포함시켜야 합니다.
+            혜택은 카테고리별로 구분하여 설명하고, 사용자의 소비 패턴과 관련된 혜택을 강조해 주세요.
             
-            return response.choices[0].message['content']
+            사용자의 질문을 분석하여 가장 적합한 카드를 먼저 추천하고, 그 이유를 설명해 주세요.
+            각 카드의 혜택을 명확히 표시하고, 사용자가 이해하기 쉽도록 구체적인 예시를 들어 설명해 주세요.
+            """
+            
+            # 사용자 프롬프트 템플릿
+            human_template = """
+            다음은 사용자의 질문입니다:
+            {query}
+            
+            다음은 사용자 정보와 추천 카드에 대한 정보입니다:
+            {context}
+            
+            응답 형식:
+            1. 사용자의 소비 패턴 요약
+            2. 추천 카드 목록 (각 카드마다):
+               - 카드명: [카드 이름]
+               - 카드사: [카드사 이름]
+               - 추천 이유: [사용자 특성에 맞는 추천 이유]
+               - 주요 혜택:
+                 * [혜택 카테고리1]: [혜택 설명1]
+                 * [혜택 카테고리2]: [혜택 설명2]
+                 * [혜택 카테고리3]: [혜택 설명3]
+            3. 종합 추천 의견
+            
+            위 정보를 바탕으로 사용자의 질문에 자연스럽게 답변해주세요.
+            답변은 친절하고 자연스러운 대화체로 작성해주세요.
+            """
+            
+            # 메시지 템플릿 생성 
+            system_message_prompt = SystemMessagePromptTemplate.from_template(system_template)
+            human_message_prompt = HumanMessagePromptTemplate.from_template(human_template)
+            
+            chat_prompt = ChatPromptTemplate.from_messages([
+                system_message_prompt, 
+                human_message_prompt
+            ])
+            
+            # LLMChain 생성 및 실행
+            chain = LLMChain(llm=self.llm, prompt=chat_prompt)
+            response = chain.run(query=user_query, context=context)
+            
+            return response
             
         except Exception as e:
-            print(f"GPT 응답 생성 중 오류 발생: {str(e)}")
+            print(f"LLM 응답 생성 중 오류 발생: {str(e)}")
             return f"죄송합니다. 응답 생성 중 오류가 발생했습니다. 다시 질문해 주세요."
             
     def process_user_query(self, user_id: str, user_query: str) -> str:
@@ -664,8 +689,8 @@ class CardRecommendationRAG:
             if not recommendations:
                 return "죄송합니다. 조건에 맞는 추천 카드를 찾을 수 없습니다. 다른 조건으로 다시 시도해주세요."
             
-            # GPT를 사용한 응답 생성
-            response = self.generate_response_with_gpt(user_query, user_profile, recommendations)
+            # LangChain LLM을 사용한 응답 생성
+            response = self.generate_response_with_llm(user_query, user_profile, recommendations)
             
             return response
             
@@ -783,7 +808,7 @@ if __name__ == "__main__":
     # MySQL 설정
     mysql_config = {
     "host": os.getenv("MYSQL_HOST","localhost"),  # 팀원들은 여기에 당신의 맥북 IP를 입력해야 함
-    "user": os.getenv("MYSQL_USER","recommendtation_team"),
+    "user": os.getenv("MYSQL_USER","recommendation_team"),
     "password": os.getenv("MYSQL_PASSWORD",""),  # docker-compose.yml에서 설정한 비밀번호
     "database": os.getenv("MYSQL_DATABASE","card_recommendation")
 }

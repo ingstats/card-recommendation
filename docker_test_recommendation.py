@@ -1,4 +1,4 @@
-# test_recommendation.py
+# langchain_test_recommendation.py
 from card_recommendation import CardRecommendationRAG
 import os
 from dotenv import load_dotenv
@@ -15,7 +15,7 @@ def main():
         "database": os.getenv("MYSQL_DATABASE", "card_recommendation")
     }
     
-    print("CardRecommendationRAG 시스템 테스트 시작...")
+    print("LangChain 기반 CardRecommendationRAG 시스템 테스트 시작...")
     # 추천 시스템 초기화
     rec_system = CardRecommendationRAG(mysql_config)
     
