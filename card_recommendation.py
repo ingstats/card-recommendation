@@ -6,16 +6,14 @@ from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 import mysql.connector
 
-# LangChain 관련 임포트
+# LangChain 관련 임포트 업데이트
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI  # 변경됨: openai 패키지로 이동
 from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from langchain.chains import LLMChain
 from langchain.schema import Document
 from langchain.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
-from langchain.retrievers.self_query.base import SelfQueryRetriever
 
 # 환경 변수 로드
 load_dotenv()
@@ -59,6 +57,10 @@ class CardRecommendationRAG:
             model_name="gpt-3.5-turbo",
             max_tokens=1500
         )
+        
+        # 벡터 저장소 초기화 (retriever가 정의되지 않은 경우 대비)
+        self.vector_store = None
+        self.retriever = None
         
         # 카드 데이터 로드 및 벡터 저장소 생성
         self.load_card_data()
@@ -160,13 +162,25 @@ class CardRecommendationRAG:
             
             # 캐시된 벡터 저장소가 있는지 확인
             if os.path.exists(f"{cache_file}.faiss") and os.path.exists(f"{cache_file}.pkl"):
-                # 캐시된 벡터 저장소 로드
-                self.vector_store = FAISS.load_local(
-                    folder_path=".",
-                    index_name=cache_file,
-                    embeddings=self.embedding_model
-                )
-                print(f"캐시된 벡터 저장소 로드 완료")
+                try:
+                    # 캐시된 벡터 저장소 로드 (보안 옵션 추가)
+                    self.vector_store = FAISS.load_local(
+                        folder_path=".",
+                        index_name=cache_file,
+                        embeddings=self.embedding_model,
+                        allow_dangerous_deserialization=True  # 안전한 환경에서만 사용
+                    )
+                    print(f"캐시된 벡터 저장소 로드 완료")
+                except Exception as e:
+                    print(f"캐시된 벡터 저장소 로드 실패, 새 저장소 생성: {str(e)}")
+                    # 새 벡터 저장소 생성
+                    self.vector_store = FAISS.from_documents(
+                        documents=self.card_documents,
+                        embedding=self.embedding_model
+                    )
+                    
+                    # 새로 생성한 벡터 저장소 캐싱
+                    self.vector_store.save_local(folder_path=".", index_name=cache_file)
             else:
                 # 새 벡터 저장소 생성
                 self.vector_store = FAISS.from_documents(
@@ -178,14 +192,29 @@ class CardRecommendationRAG:
                 self.vector_store.save_local(folder_path=".", index_name=cache_file)
                 print(f"카드 벡터 저장소 생성 완료")
             
-            # 검색기(Retriever) 생성
-            self.retriever = self.vector_store.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 10}
-            )
+            # 검색기(Retriever) 생성 - 항상 실행되도록 함
+            if self.vector_store:
+                self.retriever = self.vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 10}
+                )
             
         except Exception as e:
             print(f"벡터 저장소 생성 중 오류 발생: {str(e)}")
+            # 벡터 저장소 생성 실패 시 백업 처리
+            if not self.vector_store and self.card_documents:
+                try:
+                    print("백업 벡터 저장소 생성 시도...")
+                    self.vector_store = FAISS.from_documents(
+                        documents=self.card_documents,
+                        embedding=self.embedding_model
+                    )
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 10}
+                    )
+                except Exception as backup_error:
+                    print(f"백업 벡터 저장소 생성 실패: {str(backup_error)}")
     
     def get_user_profile(self, user_id: str) -> Dict[str, Any]:
         """
@@ -270,6 +299,11 @@ class CardRecommendationRAG:
             List: 검색 결과 (카드 정보)
         """
         try:
+            # retriever가 없는 경우 빈 리스트 반환
+            if not self.retriever:
+                print("retriever가 초기화되지 않았습니다. 모델 기반 추천으로 대체합니다.")
+                return []
+            
             # 사용자 프로필 정보를 쿼리에 추가하여 맥락화
             contextualized_query = query
             if user_profile:
@@ -655,11 +689,14 @@ class CardRecommendationRAG:
                 human_message_prompt
             ])
             
-            # LLMChain 생성 및 실행
-            chain = LLMChain(llm=self.llm, prompt=chat_prompt)
-            response = chain.run(query=user_query, context=context)
+            # LLMChain 대신 파이프라인 방식 사용
+            chain = chat_prompt | self.llm
+            response = chain.invoke({"query": user_query, "context": context})
             
-            return response
+            # 응답 내용 추출
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            return response_text
             
         except Exception as e:
             print(f"LLM 응답 생성 중 오류 발생: {str(e)}")
@@ -687,7 +724,14 @@ class CardRecommendationRAG:
             recommendations = self.get_top_n_recommendations(user_id, user_query, limit=5)
             
             if not recommendations:
-                return "죄송합니다. 조건에 맞는 추천 카드를 찾을 수 없습니다. 다른 조건으로 다시 시도해주세요."
+                # 의미론적 검색 실패 시 모델 기반 추천만 사용
+                if not self.retriever:
+                    print("의미론적 검색 실패, 모델 기반 추천만 사용")
+                    recommendations = self.get_model_recommendations(user_id)[:5]
+                
+                # 그래도 추천 카드가 없는 경우
+                if not recommendations:
+                    return "죄송합니다. 조건에 맞는 추천 카드를 찾을 수 없습니다. 다른 조건으로 다시 시도해주세요."
             
             # LangChain LLM을 사용한 응답 생성
             response = self.generate_response_with_llm(user_query, user_profile, recommendations)
@@ -807,11 +851,13 @@ class CardRecommendationRAG:
 if __name__ == "__main__":
     # MySQL 설정
     mysql_config = {
-    "host": os.getenv("MYSQL_HOST","localhost"),  # 팀원들은 여기에 당신의 맥북 IP를 입력해야 함
-    "user": os.getenv("MYSQL_USER","recommendation_team"),
-    "password": os.getenv("MYSQL_PASSWORD",""),  # docker-compose.yml에서 설정한 비밀번호
-    "database": os.getenv("MYSQL_DATABASE","card_recommendation")
+    "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
+    "port": int(os.getenv("MYSQL_PORT", "3307")),
+    "user": os.getenv("MYSQL_USER", "recommendation_team"),
+    "password": os.getenv("MYSQL_PASSWORD", ""),
+    "database": os.getenv("MYSQL_DATABASE", "card_recommendation")
 }
+
     
     # 추천 시스템 초기화
     recommendation_system = CardRecommendationRAG(mysql_config)

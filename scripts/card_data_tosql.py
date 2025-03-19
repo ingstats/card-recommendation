@@ -12,11 +12,13 @@ def create_db_connection():
     connection = None
     try:
         connection = pymysql.connect(
-            host=os.getenv("MYSQL_HOST", "localhost"),
-            user=os.getenv("MYSQL_USER", "recommendation_team"),
-            password=os.getenv("MYSQL_PASSWORD", ""),
-            database=os.getenv("MYSQL_DATABASE", "card_recommendation")
+        host=os.getenv("MYSQL_HOST", "localhost"),
+        port=int(os.getenv("MYSQL_PORT", "3307")),
+        user=os.getenv("MYSQL_USER", "recommendation_team"),
+        password=os.getenv("MYSQL_PASSWORD", ""),
+        database=os.getenv("MYSQL_DATABASE", "card_recommendation")
         )
+
         print("MySQL 데이터베이스 연결 성공")
     except Exception as err:
         print(f"Error: '{err}'")

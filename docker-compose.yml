@@ -10,7 +10,7 @@ services:
       MYSQL_USER: ${MYSQL_USER:-recommendation_team}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-your_password}
     ports:
-      - "3306:3306"
+      - "3307:3306"
     command: >
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_unicode_ci
