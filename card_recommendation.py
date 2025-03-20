@@ -6,10 +6,10 @@ from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 import mysql.connector
 
-# LangChain 관련 임포트 업데이트
+# LangChain 관련 임포트
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_openai import ChatOpenAI  # 변경됨: openai 패키지로 이동
+from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain.schema import Document
 from langchain.output_parsers import PydanticOutputParser
@@ -46,19 +46,19 @@ class CardRecommendationRAG:
         # MySQL 연결 설정
         self.mysql_config = mysql_config
         
-        # LangChain 임베딩 모델 초기화 (SentenceTransformer 대체)
+        # LangChain 임베딩 모델 초기화
         self.embedding_model = HuggingFaceEmbeddings(
             model_name="paraphrase-multilingual-MiniLM-L12-v2"
         )
         
-        # LangChain LLM 초기화 (OpenAI API 대체)
+        # LangChain LLM 초기화
         self.llm = ChatOpenAI(
             temperature=0.7,
             model_name="gpt-3.5-turbo",
             max_tokens=1500
         )
         
-        # 벡터 저장소 초기화 (retriever가 정의되지 않은 경우 대비)
+        # 벡터 저장소 초기화
         self.vector_store = None
         self.retriever = None
         
@@ -163,7 +163,7 @@ class CardRecommendationRAG:
             # 캐시된 벡터 저장소가 있는지 확인
             if os.path.exists(f"{cache_file}.faiss") and os.path.exists(f"{cache_file}.pkl"):
                 try:
-                    # 캐시된 벡터 저장소 로드 (보안 옵션 추가)
+                    # 캐시된 벡터 저장소 로드
                     self.vector_store = FAISS.load_local(
                         folder_path=".",
                         index_name=cache_file,
@@ -231,7 +231,91 @@ class CardRecommendationRAG:
             connection = mysql.connector.connect(**self.mysql_config)
             cursor = connection.cursor(dictionary=True)
             
-            # 사용자 기본 정보 쿼리
+            # 두 가지 접근 방식 - 새로운 트랜잭션 데이터 형식 또는 기존 형식
+            # 1. 새로운 트랜잭션 데이터 형식(SEQ 기반 사용자 ID)
+            if len(user_id) > 20:  # 긴 ID는 트랜잭션 데이터 형식
+                query = """
+                SELECT 
+                    t.seq_id as user_id,
+                    t.age_group as age,
+                    t.gender,
+                    t.member_rank,
+                    t.life_stage,
+                    t.region_code,
+                    t.total_usage_amount,
+                    t.card_sales_amount,
+                    t.restaurant_amount,
+                    t.clothing_amount + t.clothing_general_amount as shopping_amount,
+                    t.travel_amount + t.travel_general_amount as travel_amount,
+                    t.top_spending_category
+                FROM user_transactions t
+                WHERE t.seq_id = %s
+                """
+                cursor.execute(query, (user_id,))
+                user_trans = cursor.fetchone()
+                
+                if user_trans:
+                    # 인코딩된 값을 사람이 읽을 수 있는 형식으로 매핑
+                    gender_str = "남성" if user_trans["gender"] == 1 else "여성"
+                    
+                    # 연령대 매핑
+                    age_mapping = {0: 20, 1: 30, 2: 40, 3: 50, 4: 60, 5: 70}
+                    age_value = age_mapping.get(user_trans["age"], 35)
+                    
+                    # 회원등급에 따른 소득수준
+                    income_level = "상위" if user_trans["member_rank"] <= 2 else "중간" if user_trans["member_rank"] == 3 else "낮음"
+                    
+                    # 트랜잭션 데이터에서 소비 패턴 가져오기
+                    spending_query = """
+                    SELECT
+                        CASE 
+                            WHEN restaurant_amount > 50 THEN '외식' 
+                            WHEN restaurant_amount > 20 THEN '카페' 
+                            ELSE NULL 
+                        END as category1,
+                        CASE 
+                            WHEN clothing_amount + clothing_general_amount > 50 THEN '의류쇼핑'
+                            WHEN furniture_amount + appliance_amount > 50 THEN '가전/가구'
+                            ELSE NULL 
+                        END as category2,
+                        CASE 
+                            WHEN travel_amount + travel_general_amount > 30 THEN '여행'
+                            WHEN auto_amount + automaint_amount > 30 THEN '자동차'
+                            ELSE NULL 
+                        END as category3
+                    FROM user_transactions
+                    WHERE seq_id = %s
+                    """
+                    cursor.execute(spending_query, (user_id,))
+                    spending_result = cursor.fetchone()
+                    
+                    # None 값 필터링하고 소비 패턴 문자열 형성
+                    if spending_result:
+                        categories = [cat for cat in spending_result.values() if cat]
+                        if not categories:
+                            # 유의미한 카테고리가 없으면 기본값 사용
+                            spending_pattern = "일반적인 소비 습관"
+                        else:
+                            # 감지된 카테고리 합치기
+                            spending_pattern = ", ".join(categories) + "을 중심으로 하는 소비 습관"
+                    else:
+                        spending_pattern = "일반적인 소비 습관"
+                    
+                    # 사용자 프로필 구성
+                    user_profile = {
+                        "user_id": user_id,
+                        "연령대": f"{age_value}대",
+                        "성별": gender_str,
+                        "소득 수준": income_level,
+                        "직업": "직장인",  # 기본값, 후에 정제 가능
+                        "소비 패턴": spending_pattern,
+                        "총 지출액": user_trans["total_usage_amount"]
+                    }
+                    cursor.close()
+                    connection.close()
+                    return user_profile
+            
+            # 2. 기존 사용자 데이터 형식 처리
             query = """
             SELECT u.user_id, u.age, u.gender, u.income_level, u.job_category 
             FROM users u 
@@ -245,7 +329,7 @@ class CardRecommendationRAG:
                 connection.close()
                 return {}
             
-            # 사용자 소비 패턴 쿼리
+            # 사용자 소비 패턴 조회
             query_consumption = """
             SELECT cp.category, cp.amount, cp.frequency
             FROM consumption_patterns cp
@@ -286,20 +370,127 @@ class CardRecommendationRAG:
         result = ", ".join([f"{p['category']}({p['frequency']})" for p in top_categories])
         return f"{result}을 중심으로 하는 소비 습관"
     
-    def semantic_search(self, query: str, user_profile: Dict[str, Any], top_k: int = 10) -> List[Dict[str, Any]]:
+    def extract_spending_insights(self, user_id: str) -> Dict[str, Any]:
+        """
+        트랜잭션 데이터에서 소비 인사이트 추출
+        
+        Args:
+            user_id: 사용자 ID
+            
+        Returns:
+            Dict: 소비 인사이트
+        """
+        # 트랜잭션 데이터 형식 ID만 처리
+        if not len(user_id) > 20:
+            return {}
+        
+        try:
+            # MySQL 연결
+            connection = mysql.connector.connect(**self.mysql_config)
+            cursor = connection.cursor(dictionary=True)
+            
+            # 카테고리별 지출 조회 쿼리
+            query = """
+            SELECT 
+                restaurant_amount,
+                clothing_amount + clothing_general_amount as clothing_total,
+                travel_amount + travel_general_amount as travel_total,
+                grocery_amount,
+                auto_amount + automaint_amount + autosl_amount as auto_total,
+                hotel_amount,
+                culture_amount,
+                interior_amount + furniture_amount as home_total,
+                total_usage_amount
+            FROM user_transactions
+            WHERE seq_id = %s
+            """
+            cursor.execute(query, (user_id,))
+            spending = cursor.fetchone()
+            
+            if not spending:
+                cursor.close()
+                connection.close()
+                return {}
+            
+            # 각 카테고리의 총 지출 대비 비율 계산
+            total = spending["total_usage_amount"] or 1  # 0으로 나누기 방지
+            
+            insights = {
+                "외식/카페": {
+                    "금액": spending["restaurant_amount"],
+                    "비율": round(spending["restaurant_amount"] / total * 100, 1)
+                },
+                "쇼핑/의류": {
+                    "금액": spending["clothing_total"],
+                    "비율": round(spending["clothing_total"] / total * 100, 1)
+                },
+                "여행/교통": {
+                    "금액": spending["travel_total"],
+                    "비율": round(spending["travel_total"] / total * 100, 1)
+                },
+                "식료품": {
+                    "금액": spending["grocery_amount"],
+                    "비율": round(spending["grocery_amount"] / total * 100, 1)
+                },
+                "자동차": {
+                    "금액": spending["auto_total"],
+                    "비율": round(spending["auto_total"] / total * 100, 1)
+                },
+                "숙박": {
+                    "금액": spending["hotel_amount"],
+                    "비율": round(spending["hotel_amount"] / total * 100, 1)
+                },
+                "문화/여가": {
+                    "금액": spending["culture_amount"],
+                    "비율": round(spending["culture_amount"] / total * 100, 1)
+                },
+                "가정/인테리어": {
+                    "금액": spending["home_total"],
+                    "비율": round(spending["home_total"] / total * 100, 1)
+                }
+            }
+            
+            # 금액으로 정렬하고 상위 카테고리 가져오기
+            sorted_categories = sorted(
+                insights.items(),
+                key=lambda x: x[1]["금액"],
+                reverse=True
+            )
+            
+            # 상위 3개 카테고리
+            top_categories = sorted_categories[:3]
+            
+            result = {
+                "총 지출": total,
+                "주요 카테고리": {cat[0]: cat[1] for cat in top_categories},
+                "모든 카테고리": insights
+            }
+            
+            cursor.close()
+            connection.close()
+            return result
+            
+        except Exception as e:
+            print(f"소비 인사이트 추출 중 오류 발생: {str(e)}")
+            return {}
+    
+    def semantic_search(self, query: str, user_profile: Dict[str, Any], 
+                       spending_insights: Dict[str, Any] = None, 
+                       top_k: int = 10) -> List[Dict[str, Any]]:
         """
         LangChain 기반 의미론적 검색 수행
         
         Args:
             query: 검색 쿼리
             user_profile: 사용자 프로필
+            spending_insights: 소비 인사이트
             top_k: 상위 k개 결과 반환
             
         Returns:
             List: 검색 결과 (카드 정보)
         """
         try:
-            # retriever가 없는 경우 빈 리스트 반환
+            # 검색기가 없으면 빈 리스트 반환
             if not self.retriever:
                 print("retriever가 초기화되지 않았습니다. 모델 기반 추천으로 대체합니다.")
                 return []
@@ -310,6 +501,14 @@ class CardRecommendationRAG:
                 user_context = f"사용자는 {user_profile.get('연령대', '')} {user_profile.get('성별', '')}이고, "
                 user_context += f"{user_profile.get('직업', '')}이며, {user_profile.get('소비 패턴', '')}입니다. "
                 contextualized_query = user_context + query
+            
+            # 소비인사이트가 있으면 추가
+            if spending_insights and spending_insights.get("주요 카테고리"):
+                top_categories = spending_insights["주요 카테고리"]
+                categories_context = "주요 소비 카테고리: "
+                for cat_name, cat_data in top_categories.items():
+                    categories_context += f"{cat_name}({cat_data['비율']}%), "
+                contextualized_query += " " + categories_context
             
             # LangChain 검색기로 관련 문서 검색
             relevant_docs = self.retriever.get_relevant_documents(contextualized_query)
@@ -325,10 +524,15 @@ class CardRecommendationRAG:
                 if not card_data.empty:
                     card_dict = card_data.iloc[0].to_dict()
                     
+                    # 개인화된 추천 이유 생성
+                    recommendation_reason = self._generate_recommendation_reason(
+                        card_dict, query, user_profile, spending_insights
+                    )
+                    
                     results.append({
                         'card_id': card_id,
                         'similarity_score': 1.0 - (i * 0.05),  # 유사도 점수 근사화 (1.0에서 시작하여 0.05씩 감소)
-                        'recommendation_reason': self._generate_recommendation_reason(card_dict, query, user_profile),
+                        'recommendation_reason': recommendation_reason,
                         'details': card_dict
                     })
             
@@ -338,7 +542,10 @@ class CardRecommendationRAG:
             print(f"의미론적 검색 중 오류 발생: {str(e)}")
             return []
     
-    def _generate_recommendation_reason(self, card_details: Dict[str, Any], query: str, user_profile: Dict[str, Any]) -> str:
+    def _generate_recommendation_reason(self, card_details: Dict[str, Any], 
+                                      query: str, 
+                                      user_profile: Dict[str, Any],
+                                      spending_insights: Dict[str, Any] = None) -> str:
         """
         추천 이유 생성
         
@@ -346,6 +553,7 @@ class CardRecommendationRAG:
             card_details: 카드 상세 정보
             query: 사용자 질의
             user_profile: 사용자 프로필
+            spending_insights: 소비 인사이트
             
         Returns:
             str: 추천 이유
@@ -359,6 +567,10 @@ class CardRecommendationRAG:
             categories_text = consumption_pattern.split('중심으로')[0].strip()
             categories = [c.split('(')[0].strip() for c in categories_text.split(',')]
         
+        # 소비인사이트에서 카테고리 추가
+        if spending_insights and spending_insights.get("주요 카테고리"):
+            categories.extend(spending_insights["주요 카테고리"].keys())
+        
         # 카드 혜택 정보
         benefits = card_details.get('benefits', '')
         
@@ -370,6 +582,14 @@ class CardRecommendationRAG:
             if category in benefits:
                 reason += f" 특히 {category} 관련 혜택이 귀하의 소비 패턴과 일치합니다."
                 break
+        
+        # 트랜잭션 데이터의 인사이트가 있으면 추가
+        if spending_insights and spending_insights.get("주요 카테고리"):
+            top_category = list(spending_insights["주요 카테고리"].keys())[0]
+            percentage = spending_insights["주요 카테고리"][top_category]["비율"]
+            
+            if top_category in benefits and percentage > 10:
+                reason += f" 귀하는 {top_category}에 총 지출의 {percentage}%를 사용하고 있어 해당 혜택이 더욱 유용할 것입니다."
         
         return reason
     
@@ -389,14 +609,17 @@ class CardRecommendationRAG:
             # 사용자 프로필 조회
             user_profile = self.get_user_profile(user_id)
             
+            # 소비인사이트 추출 (새로운 트랜잭션 데이터 형식)
+            spending_insights = self.extract_spending_insights(user_id) if len(user_id) > 20 else {}
+            
             # 딥러닝 모델 기반 Top-N 카드 가져오기
-            recommended_cards = self.get_model_recommendations(user_id)
+            model_recommended_cards = self.get_model_recommendations(user_id)
             
             # 의미론적 검색 수행
-            semantic_results = self.semantic_search(query, user_profile, top_k=10)
+            semantic_results = self.semantic_search(query, user_profile, spending_insights, top_k=10)
             
             # 두 결과 병합 및 재정렬
-            combined_results = self.merge_recommendations(recommended_cards, semantic_results)
+            combined_results = self.merge_recommendations(model_recommended_cards, semantic_results)
             
             # 상위 N개 결과 반환
             return combined_results[:limit]
@@ -563,13 +786,15 @@ class CardRecommendationRAG:
         return parsed_benefits
     
     def prepare_context_for_llm(self, user_profile: Dict[str, Any], 
-                              recommendations: List[Dict[str, Any]]) -> Dict[str, Any]:
+                              recommendations: List[Dict[str, Any]],
+                              spending_insights: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         LLM에 전달할 컨텍스트 정보 준비 (LangChain 형식)
         
         Args:
             user_profile: 사용자 프로필 정보
             recommendations: 추천 카드 목록
+            spending_insights: 소비 인사이트
             
         Returns:
             Dict: LLM에 전달할 컨텍스트 정보
@@ -579,6 +804,11 @@ class CardRecommendationRAG:
         for key, value in user_profile.items():
             if key != 'user_id':  # user_id는 제외
                 user_info[key] = value
+        
+        # 소비인사이트가 있으면 추가
+        if spending_insights:
+            user_info["주요 소비 카테고리"] = spending_insights.get("주요 카테고리", {})
+            user_info["총 지출액"] = spending_insights.get("총 지출", 0)
         
         # 추천 카드 정보 구성
         rec_cards = []
@@ -627,7 +857,8 @@ class CardRecommendationRAG:
         return context
     
     def generate_response_with_llm(self, user_query: str, user_profile: Dict[str, Any], 
-                                 recommendations: List[Dict[str, Any]]) -> str:
+                                 recommendations: List[Dict[str, Any]],
+                                 spending_insights: Dict[str, Any] = None) -> str:
         """
         LangChain LLM을 사용하여 사용자 질문에 대한 응답 생성
         
@@ -635,13 +866,14 @@ class CardRecommendationRAG:
             user_query: 사용자 질문
             user_profile: 사용자 프로필 정보
             recommendations: 추천 카드 목록
+            spending_insights: 소비 인사이트
             
         Returns:
             str: LLM 응답 문자열
         """
         try:
             # 컨텍스트 준비 (LangChain 형식)
-            context = self.prepare_context_for_llm(user_profile, recommendations)
+            context = self.prepare_context_for_llm(user_profile, recommendations, spending_insights)
             
             # 시스템 프롬프트 템플릿
             system_template = """
@@ -689,7 +921,7 @@ class CardRecommendationRAG:
                 human_message_prompt
             ])
             
-            # LLMChain 대신 파이프라인 방식 사용
+            # 파이프라인 방식 사용
             chain = chat_prompt | self.llm
             response = chain.invoke({"query": user_query, "context": context})
             
@@ -720,6 +952,9 @@ class CardRecommendationRAG:
             if not user_profile:
                 return "사용자 정보를 찾을 수 없습니다. 올바른 사용자 ID를 입력해주세요."
             
+            # 소비인사이트 추출 (새로운 트랜잭션 데이터 형식)
+            spending_insights = self.extract_spending_insights(user_id) if len(user_id) > 20 else {}
+            
             # 추천 카드 조회 (최대 5개)
             recommendations = self.get_top_n_recommendations(user_id, user_query, limit=5)
             
@@ -734,7 +969,7 @@ class CardRecommendationRAG:
                     return "죄송합니다. 조건에 맞는 추천 카드를 찾을 수 없습니다. 다른 조건으로 다시 시도해주세요."
             
             # LangChain LLM을 사용한 응답 생성
-            response = self.generate_response_with_llm(user_query, user_profile, recommendations)
+            response = self.generate_response_with_llm(user_query, user_profile, recommendations, spending_insights)
             
             return response
             

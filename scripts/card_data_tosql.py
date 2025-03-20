@@ -29,41 +29,41 @@ def execute_query(connection, query, data=None):
     cursor = connection.cursor()
     try:
         if data:
-            cursor.execute(query, data)
+            cursor.execute(query, data)  # 데이터가 있는 경우 파라미터화된 쿼리 실행
         else:
-            cursor.execute(query)
-        connection.commit()
+            cursor.execute(query)  # 데이터가 없는 경우 일반 쿼리 실행
+        connection.commit()  # 변경사항 커밋
         print("쿼리 성공적으로 실행")
     except Exception as err:
         print(f"Error: '{err}'")
     finally:
-        cursor.close()
+        cursor.close()  # 커서 닫기
 
 # 조회 쿼리 실행 함수
 def read_query(connection, query):
     cursor = connection.cursor()
     result = None
     try:
-        cursor.execute(query)
-        result = cursor.fetchall()
+        cursor.execute(query)  # 쿼리 실행
+        result = cursor.fetchall()  # 모든 결과 가져오기
         return result
     except Exception as err:
         print(f"Error: '{err}'")
         return None
     finally:
-        cursor.close()
+        cursor.close()  # 커서 닫기
 
 # 엑셀 파일 읽기
 def read_excel_data(file_path):
     try:
-        df = pd.read_excel(file_path)
+        df = pd.read_excel(file_path)  # 엑셀 파일 읽기
         print(f"엑셀 파일에서 {len(df)} 행 읽기 성공")
         return df
     except Exception as e:
         print(f"엑셀 파일 읽기 오류: {str(e)}")
         return None
 
-# 혜택 파싱 함수 (conditions 반환 제거)
+# 혜택 파싱 함수
 def parse_benefits(benefits_text):
     if not benefits_text or pd.isna(benefits_text):
         return ""
@@ -93,7 +93,7 @@ def insert_card_data(connection, df):
         VALUES (%s, %s, %s, %s, %s, %s)
         """
         
-        # card_gorilla_data 테이블 삽입 쿼리 (conditions 필드 제외)
+        # card_gorilla_data 테이블 삽입 쿼리
         insert_gorilla_query = """
         INSERT INTO card_gorilla_data (card_id, detailed_benefits)
         VALUES (%s, %s)
@@ -103,38 +103,38 @@ def insert_card_data(connection, df):
         for index, row in df.iterrows():
             card_name = row.get('Card Name', '') 
             if pd.isna(card_name):
-                card_name = f"Unknown Card {index}"
+                card_name = f"Unknown Card {index}"  # 카드명이 없는 경우 기본값 설정
                 
             corporate_name = row.get('Corporate Name', '')
             if pd.isna(corporate_name):
-                corporate_name = "기타"
+                corporate_name = "기타"  # 카드사명이 없는 경우 기본값 설정
                 
-            # 고유 ID 생성
+            # 고유 ID 생성 (일련번호 기반)
             card_id = f"CARD{str(index+1).zfill(3)}"
             
             # 혜택 정보
             benefits = row.get('Benefits', '')
             if pd.isna(benefits):
-                benefits = ''
+                benefits = ''  # 혜택이 없는 경우 빈 문자열 처리
                 
             # 이미지 URL
             image_url = row.get('Image URLs', '')
             if pd.isna(image_url):
-                image_url = ''
+                image_url = ''  # 이미지 URL이 없는 경우 빈 문자열 처리
             
             # 카드 타입
             card_type = row.get('Card Type', '신용카드')
             if pd.isna(card_type):
-                card_type = '신용카드'
+                card_type = '신용카드'  # 카드 타입이 없는 경우 기본값 설정
                 
-            # 상세 혜택 파싱 (conditions 반환 값 제거)
+            # 상세 혜택 파싱
             detailed_benefits = parse_benefits(benefits)
             
             # cards 테이블 데이터 삽입
             card_data = (card_id, card_name, corporate_name, benefits, image_url, card_type)
             execute_query(connection, insert_card_query, card_data)
             
-            # card_gorilla_data 테이블 데이터 삽입 (conditions 필드 제외)
+            # card_gorilla_data 테이블 데이터 삽입
             gorilla_data = (card_id, detailed_benefits)
             execute_query(connection, insert_gorilla_query, gorilla_data)
             
@@ -206,7 +206,7 @@ def insert_test_users(connection):
 def insert_test_recommendations(connection):
     try:
         # 카드 ID 조회
-        query = "SELECT card_id FROM cards LIMIT 20"
+        query = "SELECT card_id FROM cards LIMIT 20"  # 최대 20개 카드만 선택
         results = read_query(connection, query)
         
         if not results:
@@ -231,7 +231,7 @@ def insert_test_recommendations(connection):
             
             for rank, idx in enumerate(selected_cards, 1):
                 card_id = card_ids[idx]
-                # 점수는 0.7~0.95 사이 무작위 값
+                # 점수는 0.7~0.95 사이 무작위 값 (순위가 높을수록 높은 점수)
                 score = round(np.random.uniform(0.7, 0.95), 2)
                 
                 # 추천 데이터 삽입
