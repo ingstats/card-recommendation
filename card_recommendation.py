@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import mysql.connector
 
 # LangChain 관련 임포트
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
@@ -48,7 +48,7 @@ class CardRecommendationRAG:
         
         # LangChain 임베딩 모델 초기화
         self.embedding_model = HuggingFaceEmbeddings(
-            model_name="paraphrase-multilingual-MiniLM-L12-v2"
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
         
         # LangChain LLM 초기화
@@ -511,7 +511,7 @@ class CardRecommendationRAG:
                 contextualized_query += " " + categories_context
             
             # LangChain 검색기로 관련 문서 검색
-            relevant_docs = self.retriever.get_relevant_documents(contextualized_query)
+            relevant_docs = self.retriever.invoke(contextualized_query)
             
             # 결과 구성
             results = []
