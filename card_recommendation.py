@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 import mysql.connector
 
-# LangChain 관련 임포트
+# LangChain 관련 임포트 - 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
