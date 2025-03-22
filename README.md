@@ -13,10 +13,12 @@
 ## 🔧 시스템 구성 요소
 
 ### 데이터베이스
+
 - MySQL 8.0 Docker 컨테이너
 - 카드 정보, 사용자 프로필, 소비 패턴, 추천 결과 저장
 
 ### 백엔드
+
 - Python 기반 RAG 엔진
 - 의미론적 검색을 위한 SentenceTransformer
 - OpenAI GPT 통합 API
@@ -24,43 +26,50 @@
 ## 📋 설치 및 실행 방법
 
 ### 필수 요구사항
+
 - Docker Desktop
-- Python 3.7 이상
+- Python 3.10 권장
 - pip (Python 패키지 관리자)
 
 ### 1. 저장소 클론
+
 ```bash
-git clone https://github.com/yourusername/card-recommendation-system.git
-cd card-recommendation-system
+# 폴더 만들때 한국어 x 영어로 띄어쓰기 없이만들자
+git clone https://github.com/ingstats/card-recommendation.git .
 ```
 
 ### 2. 환경 설정
+
 ```bash
 # 환경 변수 파일 생성
 cp .env.example .env
-# .env 파일을 열어 데이터베이스 및 API 키 정보 입력
+# Slack으로 공유한 내용 env파일에 ctr+c -> ctr+v하기
+# TOKENIZERS_PARALLELISM=false 작업 추가했음.
 ```
 
 ### 3. 가상환경 설정 (권장)
+
 ```bash
-python -m venv card_env
-source card_env/bin/activate  # Mac/Linux
-# 또는
-card_env\Scripts\activate  # Windows
+# Mac/Linux/Windows
+conda create -n card_env python=3.10
+conda activate card_env
 ```
 
 ### 4. 패키지 설치
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 5. Docker 환경 실행
+
 ```bash
 # Docker Desktop 실행 확인
-docker-compose up -d
+docker compose up -d
 ```
 
 ### 6. 데이터베이스 설정 및 데이터 로드
+
 ```bash
 # Mac/Linux
 chmod +x scripts/setup_mysql.sh
@@ -70,10 +79,12 @@ chmod +x scripts/setup_mysql.sh
 bash scripts/setup_mysql.sh
 
 # 카드 데이터 로드
-python scripts/card_data_tosql.py
+# 이건 생각해도 됨
+# python scripts/card_data_tosql.py
 ```
 
 ### 7. 테스트 실행
+
 ```bash
 python docker_test_recommendation.py
 ```
@@ -81,10 +92,12 @@ python docker_test_recommendation.py
 ## 📊 시스템 동작 예시
 
 **입력 예시:**
+
 - 사용자 ID: user1
 - 질문: "카페와 쇼핑할 때 혜택이 좋은 카드 추천해주세요"
 
 **출력 예시:**
+
 ```
 === 추천 결과 ===
 사용자님의 소비 패턴을 고려하여 카드를 추천해 드립니다.
